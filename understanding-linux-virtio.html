@@ -1,0 +1,284 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html  PUBLIC '-//W3C//DTD XHTML 1.0 Strict//EN'  'http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd'><html xmlns="http://www.w3.org/1999/xhtml"><head>
+    <meta content="text/html; charset=UTF-8" http-equiv="Content-Type"/> 
+    <title>Understanding Virtio on Linux: my notes</title>
+    <link href="index.rss" rel="alternate" title="RSS" type="application/rss+xml"/> 
+    <style type="text/css">
+    a:link { color: #293145; border-bottom: solid thin #293145; }
+    a:visited { color: #666; border-bottom: dotted thin #666; }
+    a:hover { color: #666; border-bottom: dotted thin #666; }
+    a:active { color: #fff; border-bottom: none; }
+    a { text-decoration: none; }
+    
+    body {
+        margin-top: 50px;
+        margin-bottom: 20px;
+        margin-left: auto;
+        margin-right: auto;
+        min-width: 50em;
+        max-width: 750px; 
+        font-family: Georgia, Cambria, 'Times New Roman', Times, serif;
+        font-size: 20px;
+        line-height: 1.4;
+    }
+    
+    h2, h3, .heading, .name {
+        color: #293145;
+        font-family: Arial, sans-serif;
+    }
+    
+    .heading, .name {
+        margin: 0;
+        text-align: right;
+    }
+    
+    .name {
+        font-size: 150%;
+        font-weight: bold;
+    }
+    
+    .me {
+        font-weight: bold;
+        font-style: inherit;
+    }
+    
+    .bibliography {
+        margin-left: 2em;
+        text-indent: -2em;
+    }
+    
+    .sideNote {
+        background-color: #d2d6fa;
+        
+        border-radius: 15px;
+        border-style: solid;
+        border-width: 5px;
+        border-color: black;
+        
+        box-shadow: 5px 5px rgba(0, 26, 98, 0.4),
+                  10px 10px rgba(0, 26, 98, 0.3),
+                  15px 15px rgba(0, 26, 98, 0.2),
+                  20px 20px rgba(0, 26, 98, 0.1),
+                  25px 25px rgba(0, 26, 98, 0.05);
+    
+    }
+    
+    .sideNote p {
+        padding-left: 1em;
+        padding-right: 1em;
+    }
+    
+    img {
+        max-width: 90%;
+        display: block;
+        margin-left: auto;
+        margin-right: auto;
+    }
+    
+    .citation {
+        list-style-type: none;
+    }
+
+    .code_file {
+        /* max-width: 1500px */
+        width: 100%;
+        max-width: 100%;
+        display: block;
+        margin-left: auto;
+        margin-right: auto;
+        float: center
+    }
+
+    .code_block {
+        max-width: 90%;
+        display: block;
+        margin-left: auto;
+        margin-right: auto;
+        background-color: #f9f9f9;
+        border: 1px dashed #2f6fab;
+    }
+
+    .source_code {
+        font-family: monospace,Courier !important;
+        display: inline-block;
+        font-size: 20px;
+    }
+    
+    </style>
+    </head>
+        
+    <body>
+
+    <div style="float: left; padding-top: 10px; padding-bottom: 10px;">
+    <p class="name">Understanding Virtio on Linux: my notes
+        </p>
+    <p class="heading"><a href="./index.html">home</a>
+    </div>
+    <br clear="all"/>
+    </div>
+    <div style="padding: 10px;">
+
+    <h3>01/26/2024</h3>
+    <ul>
+        <li><a href="#intro">Intro</a></li>
+        <li><a href="#motivations">Motivations</li>
+        <li><a href="#body">Technical details</li>
+        <li><a href="#conclusion">Conclusion</a></li>
+
+    </ul>
+
+
+    <p>
+        <h2 id="intro">Intro</h2>
+        I started writing notes on 
+            <a href="https://ozlabs.org/~rusty/virtio-spec/virtio-paper.pdf">"virtio: Towards a De-Facto Standard For Virtual I/O Devices", by Rusty Russell</a>, 
+            but then realized that 
+            even after reading the paper, I didn't understand virtio; I didn't understand what problems it solved, or the high level interactions
+            between the different components involved.
+            <br><br>
+            I ended up writing this article as I attempted to better understand it. I've decided to post it for others, as I think it gives a nice high level overview
+            of what virtio is, what problems it solves, and the different components involved.
+            <br><br>
+
+
+        <h2 id="motivations">Motivations</h2>
+        Rusty Russell's paper on virtio was published in 2008. At the time, there were a wide variety of virtualization platforms. There was User Mode Linux, Xen, 
+        VMware's ESX server, the KVM, and others. Each of these platforms had their own approaches to device emulation, and communication between the guest operating system
+        and the hypervisor. This resulted in a lack of interoperability between virtualization environments.
+        <br><br>
+        The virtio specification aimed to address this issue by providing a standardized interface for virtual devices, allowing virtual machines to communicate with emulated devices in a consistent manner across different hypervisors. 
+        By doing so, virtio sought to improve compatibility, efficiency, and performance in virtualized environments.
+
+        <br><br>
+
+        <h2 id="body">Technical details</h2>
+        Virtio devices are an abstraction that are implemented by the hypervisor. However, the hypervisor makes them appear to the guest as if they're real devices. 
+        <br><br>
+        For example, since the hypervisor intercepts guest I/O operations, it can make it appear as if a virtio device is a PCI device during the guest's PCI bus enumeration. 
+        Once the guest discovers the virtio device, the guest operating system loads in the corresponding virtio device driver to facilitate interaction with the device. 
+        <br><br>
+
+
+        <div class="sideNote">
+            <p>
+                I like this image from Oracle, which shows the overall virtio architecture. It uses the virtio-net driver/device as an example.
+                <br><br>
+
+                <img src="./images/virtio/oracle_virtio_arch.png">
+                <a href="https://blogs.oracle.com/linux/post/introduction-to-virtio">Source</a> 
+                <br><br>
+
+                The image references a KVM-based VMM. With KVM, the handling of guest I/O traps 
+                is delegated to user space. Here, Qemu is the user space program that implements the virtio-net device backend.
+        </div>
+        <br><br>
+
+        The virtio spec defines different ways that a virtio device can be attached and made available to a guest. 
+        As mentioned earlier, <a href="https://docs.oasis-open.org/virtio/virtio/v1.1/csprd01/virtio-v1.1-csprd01.html#x1-90002">
+            virtio devices can be made available as PCI devices.
+        </a>
+        Alternatively, for guests environments without PCI support, 
+        <a href="https://docs.oasis-open.org/virtio/virtio/v1.1/csprd01/virtio-v1.1-csprd01.html#x1-1440002">virtio devices can be made available directly as memory mapped io devices</a>
+        However, this requires the guest to know the
+        memory mapping of the device ahead of time.
+        <br><br>
+
+        Much of the virtio protocol is independent of how the
+        device is made visible to the guest. For example, the capabilities of the device are laid out in the device's configuration space the same way, whether the device
+        is attached through PCI or directly through MMIO. However, going forward, I'm going to limit the conversation to PCI attached virtio devices.
+        
+        <br><br>
+
+        <a href="https://wiki.osdev.org/PCI#Configuration_Space">All PCI devices have a configuration space</a>, which can be accessed by the CPU through the host PCI bridge device.
+        This space contains configuration settings about the PCI device, including the device's identity, and information that helps the BIOS or OS determine how to map
+        the device onto the CPU's memory or port address spaces. Once the device is mapped into memory or port mapped, then the CPU can access that device's I/O space.
+        <br><br>
+        <div class="sideNote">
+            <p>
+                <a href="https://docs.oasis-open.org/virtio/virtio/v1.1/csprd01/virtio-v1.1-csprd01.html#x1-1930005">
+                    The virtio standard defines different types of devices, each identified by a different device ID.
+                </a>
+                If you're implementing a virtualization platform, you'll want to implement back-ends for these devices. And if you're implementing a new
+                operating system and you want it to be easily virtualizable, then you should implement drivers for these devices.
+            </p>
+        </div>
+
+        <br><br>
+
+        The virtio protocol defines how the virtio device's I/O space is structured. 
+
+        Although the virtio specification today has a well-defined definition of this space (see "4.1.4.3 Common configuration structure layout"), 
+        I like the simplicity
+        of Rusty's structure definition from the original virtio paper:
+        <br><br>
+
+        <img src="./images/virtio/struct_virtio_pci_io.png">
+        <a href="https://ozlabs.org/~rusty/virtio-spec/virtio-paper.pdf">Source</a>        
+        <br><br>
+
+
+        Host features and guest features are defined in the virtio specification and are used to communicate supported features between the driver and the device implemented by the VMM.
+        <br><br>
+
+        The fields that begin with vring_queue are more interesting. 
+        The virtio specification defines a transport abstraction, virtual queues (virtqueues), that is used
+        for communication through shared memory between guest device drivers and the VMM's device back-ends.
+        <br><br>
+        A virtqueue is a queue into which buffers are posted by the guest for consumption by the host. 
+        Each of these buffers is a scatter gather array. A scatter gather array is an array that contains references to discontiguous memory in the guest address space. 
+        <br><br>
+        A device driver can batch multiple buffers onto the queue, and then
+        kick the VMM to make it aware that there are buffers ready for consumption. Once the VMM has consumed the buffers, it can interrupt the guest to notify 
+        it of its completion.
+        <br><br>
+        The virtqueue API looks like the following:
+        <br>
+
+        <img src="./images/virtio/virtqueue_ops.png">
+        <a href="https://ozlabs.org/~rusty/virtio-spec/virtio-paper.pdf">Source</a>
+        <br><br>
+
+        We can add items to the buffer, kick the VMM to notify it of pending buffers, retrieve consumed buffers, and disable and enable the
+        callback which is invoked by the VMM when buffers are ready.
+        <br><br>
+        Virtqueues are implemented through virtio_rings. Each virtqueue is backed by a virtio_ring, which consists of three components:
+        a descriptor table that describes buffers, an available ring that describes buffers which are ready for consumption by the host, and a used ring that the host
+        writes to as buffers are consumed.
+        <br><br>
+        The primary benefits of the virtio_ring implementation is that it a) allows batched requests and responses
+        between the guest and host, b) allows the host to consume buffers in any order, and c) allows zero-copy I/O. 
+        
+        <br><br>
+
+        Now, let's return to the definition of a virtio device's I/O address space to see how a device driver in the guest accesses a device's virtual queues:
+
+        <br><br>
+        <img src="./images/virtio/struct_virtio_pci_io.png">
+        <a href="https://ozlabs.org/~rusty/virtio-spec/virtio-paper.pdf">Source</a>
+        <br><br>
+
+        vring_queue_selector is used to access a device's virtual queues, and vring_queue_notifier
+        is used to notify the host when the queue has new buffers.
+        The queue selector is required because devices may implement different numbers of virtual queues. For example, per Rusty's paper, the virtio-blk device only has one virtual queue,
+        while the virtio-net device uses two queues - one for transmission and one for receiving.
+
+        <br><br>
+        <h2 id="conclusion">Conclusion</h2>
+        To summarize, virtio devices are most commonly made available to guest virtual machines through PCI. 
+        The PCI configuration space of the device includes the virtio device's identifier, and information that is used to map that device into memory.
+        It also contains fields that are defined in the virtio specification, and that describe the configuration of the device.
+        <br><br>
+        Once the PCI device is mapped into memory, then the I/O space of that device can be accessed by the guest. The I/O space includes fields that allow the virtio device driver to interact with the virtual
+        queues of the device - allowing for zero-copy and batched I/O operations. The guest's virtio device driver will be responsible for interacting
+        with the device via this I/O space.
+        <br><br>
+        I hope that this provides some insight into the different components of the virtio specification, and how the specification helps reduce the burden of implementing I/O mechanisms for new virtualization platforms and guest operating systems. 
+        <br><br>
+        If you're interested in digging deeper, I recommend looking through 
+        <a href="https://docs.oasis-open.org/virtio/virtio/v1.2/csd01/virtio-v1.2-csd01.html">the specification</a>, and 
+        taking a glance at 
+        <a href="https://github.com/firecracker-microvm/firecracker/tree/main/src/vmm/src/devices/virtio">Firecracker's virtio device implementations.</a>
+
+    </p>
+
+
+    </div></body></html>

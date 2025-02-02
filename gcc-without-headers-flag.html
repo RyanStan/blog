@@ -1,0 +1,404 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html  PUBLIC '-//W3C//DTD XHTML 1.0 Strict//EN'  'http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd'><html xmlns="http://www.w3.org/1999/xhtml"><head>
+    <meta content="text/html; charset=UTF-8" http-equiv="Content-Type"/> 
+    <title>Investigating the effects of GCC's --without-headers and --with-newlib configuration flags</title>
+    <link href="index.rss" rel="alternate" title="RSS" type="application/rss+xml"/> 
+    <style type="text/css">
+    a:link { color: #293145; border-bottom: solid thin #293145; }
+    a:visited { color: #666; border-bottom: dotted thin #666; }
+    a:hover { color: #666; border-bottom: dotted thin #666; }
+    a:active { color: #fff; border-bottom: none; }
+    a { text-decoration: none; }
+    
+    body {
+        margin-top: 50px;
+        margin-bottom: 20px;
+        margin-left: auto;
+        margin-right: auto;
+        min-width: 50em;
+        max-width: 750px; 
+        font-family: Georgia, Cambria, 'Times New Roman', Times, serif;
+        font-size: 20px;
+        line-height: 1.4;
+    }
+    
+    h2, h3, .heading, .name {
+        color: #293145;
+        font-family: Arial, sans-serif;
+    }
+    
+    .heading, .name {
+        margin: 0;
+        text-align: right;
+    }
+    
+    .name {
+        font-size: 250%;
+        font-weight: bold;
+    }
+    
+    .me {
+        font-weight: bold;
+        font-style: inherit;
+    }
+    
+    .bibliography {
+        margin-left: 2em;
+        text-indent: -2em;
+    }
+    
+    .sideNote {
+        background-color: #d2d6fa;
+        
+        border-radius: 15px;
+        border-style: solid;
+        border-width: 5px;
+        border-color: black;
+        
+        box-shadow: 5px 5px rgba(0, 26, 98, 0.4),
+                  10px 10px rgba(0, 26, 98, 0.3),
+                  15px 15px rgba(0, 26, 98, 0.2),
+                  20px 20px rgba(0, 26, 98, 0.1),
+                  25px 25px rgba(0, 26, 98, 0.05);
+    
+    }
+    
+    .sideNote p {
+        padding-left: 1em;
+        padding-right: 1em;
+    }
+    
+    img {
+        max-width: 90%;
+        display: block;
+        margin-left: auto;
+        margin-right: auto;
+    }
+    
+    .citation {
+        list-style-type: none;
+    }
+
+    .code_file {
+        /* max-width: 1500px */
+        width: 100%;
+        max-width: 100%;
+        display: block;
+        margin-left: auto;
+        margin-right: auto;
+        float: center
+    }
+
+    .code_block {
+        max-width: 90%;
+        display: block;
+        margin-left: auto;
+        margin-right: auto;
+        background-color: #f9f9f9;
+        border: 1px dashed #2f6fab;
+    }
+
+    .source_code {
+        font-family: monospace,Courier !important;
+        display: inline-block;
+        font-size: 20px;
+    }
+    
+    </style>
+    </head>
+        
+    <body>
+
+    <div style="float: left; padding-top: 10px; padding-bottom: 10px;">
+    <p class="name">Investigating the effects of GCC's --without-headers and --with-newlib configuration flags</p>
+    <p class="heading"><a href="index.html">home</a>
+    </div>
+    <br clear="all"/>
+    </div>
+    <div style="padding: 10px;">
+
+    <h3>08/01/2022</h3>
+    <ul>
+        <li><a href="#intro">The intro: Linux From Scratch and GCC cross-compiler confusion</a></li>
+        <li><a href="#whyCantCompileLibgcc">Why can't we compile libgcc with libc support?</a></li>
+        <li><a href="#highlevel">The difference between <span class="source_code">--with-newlib</span> and <span class="source_code">--without-headers</span></a></li>
+        <li><a href="#inhibit-libc">The effects of <span class="source_code">inhibit_libc</span> on libgcc</a></li>
+        <li><a href="#conclusion">Conclusion</a></li>
+        <li><a href="#referenceHeader">References</a></li>
+
+    </ul>
+
+    <br><br>
+    <h2 id="intro"> The intro: Linux From Scratch and GCC cross-compiler confusion </h2>
+
+    <p>
+
+        <a href="https://www.linuxfromscratch.org/">Linux From Scratch</a> (LFS) is a popular online book that guides you through creating your own Linux distribution.
+        To create a native compiler for our LFS distribution that is completely separate from our host system, we have to go through three passes of building GCC.
+
+        <br><br>
+        <ol>
+            <li>First, we build a cross-compiler (<span class="source_code">cc1</span>) that will run on our host machine and will create executables for our LFS target.</li>
+            <li>Next, we use this cross-compiler to build another compiler that <b>runs on</b> and creates code for the LFS machine (<span class="source_code">cc-lfs</span>). </li>
+            <li>Finally, we rebuild and test our native LFS compiler (<span class="source_code">cc-lfs</span>) using itself on our LFS system.  This third step ensures that 
+                our final compiler is completely isolated from the host system. </li>
+        </ol>
+        <br><br>
+
+        When building our cross-compiler in step #1, the LFS book instructs us to pass the following flags in to the configuration script.
+
+        <br><br>
+        <img src="images/detangle/configureCommandHighlighted.jpg">
+        <br><br>
+
+        The two flags I'll be investigating in this article are <span class="source_code">--with-newlib</span> and <span class="source_code">--without-headers</span>.
+
+        <br><br>
+
+        The LFS book doesn't provide great explanations of these flags.  
+        For <span class="source_code">--with-newlib</span>, they say
+        "Since a working C library is not yet available, this ensures that the <span class="source_code">inhibit_libc</span> constant is defined when building
+        libgcc. This prevents the compiling of any code that requires libc support."  For <span class="source_code">--without-headers</span>, "When creating a complete cross-compiler, 
+        GCC requires standard headers compatible with the target system. For
+        our purposes these headers will not be needed. This switch prevents GCC from looking for them." [1]
+        <br><br>
+
+        <div class="sideNote">
+            <p><b>What is libgcc?</b><br></p>
+            <p>
+                GNU provides online documentation that describes the internals of GCC. 
+                Within this documentation, there's a brief section dedicated towards describing the libgcc library.
+                <br><br>
+                "Most of the routines in libgcc handle arithmetic operations that the target processor cannot perform directly. 
+                This includes integer multiply and divide on some machines, and all floating-point and fixed-point operations on other machines. 
+                libgcc also includes routines for exception handling, and a handful of miscellaneous operations." [5]
+            </p>
+        </div>
+        <br><br>
+
+        If we're to take the LFS explanation at face value, then both these flags perform the same function by ensuring that libgcc will not use target headers from libc (glibc, in our case).
+        However, this isn't <i>exactly</i> the case; there is most definitely a nuanced difference between these two flags.  My plan for this article is to
+        is to first describe why we can't compile libgcc with libc support, even though libc is available on the host machine.  Then, I want to discuss 
+        the high level difference between the two flags.  Finally, I'll dive into the source code to see exactly how the <span class="source_code">inhibit_libc</span> macro affects things. 
+        <br><br>
+
+        <h2 id="whyCantCompileLibgcc">Why can't we compile libgcc with libc support?</h2>
+
+        GCC uses the GNU Build System to configure and build itself.  If you're not familiar with the GNU Build System (Autotools), I recommend checking out 
+        <a href="https://www.gnu.org/software/automake/manual/html_node/Autotools-Introduction.html"> GNU's Autotools Introductions.</a>
+        For a brief summary, I like to refer to this picture:
+            
+
+        <br><br>
+        <img src="images/detangle/autoTools.png">
+        [2]
+        <br><br>
+        
+        The files that developers create are <span class="source_code">configure.ac</span> and <span class="source_code">Makefile.am</span>.  The autoconf program will consume the 
+        <span class="source_code">configure.ac</span> file and create a <span class="source_code">configure</span> executable.  
+        This executable will accept an input file, <span class="source_code">Makefile.in</span>, which was generated from <span class="source_code">Makefile.am</span> by automake.  
+        The <span class="source_code">configure</span> executable will insert values from <span class="source_code">configure.ac</span> into
+        <span class="source_code">Makefile.in</span>, and the result of this process will be a regular <span class="source_code">Makefile</span>.  
+        <br><br>
+        
+        This process sounds a bit complicated, and it is.  But it needs to be.  Think about all the configuration options that need to be considered when GCC is built.  It has to support 
+        different host, build, and target environments.  It has to support threads, it has to let users configure the location where output executables should go, it has to let users specify the linker 
+        to use, etc.  The list of unique configurations for GCC is immense.  Thus, it wouldn't make sense to ship a unique <span class="source_code">Makefile</span> for each possible configuration of GCC, that would be impossible.
+        Therefore, we use the GNU Build System to solve this problem.
+        <br><br>
+
+        Moving on, let's take a look at the top level <span class="source_code">configure.ac</span> file.  <a href="https://github.com/gcc-mirror/gcc/blob/releases/gcc-11.2.0/configure.ac#L128-L168">If we take a look at lines 128 - 168</a>,
+        we'll see a few important variables defined: <span class="source_code">build_libs</span>, <span class="source_code">build_tools</span>, <span class="source_code">host_libs</span>, 
+        <span class="source_code">host_tools</span>, and <span class="source_code">target_libraries</span>.
+        <br><br>
+
+        Specifically, we see <span class="source_code">target_libgcc</span> under <span class="source_code">target_libraries</span>. We also see the comment  
+        "these libraries are built for the target environment, and are built after the host libraries and the host tools (which may be a cross compiler)". 
+
+        
+        <br><br>
+        <img src="images/detangle/targetLibs.JPG">
+        <br><br>
+
+        The target environment is the system in which the cross-compiler is generating code for.  This means a few things.  Firstly, 
+        libgcc isn't actually compiled into the GCC executable that runs on the host system.  Instead, it's a shared library that sits on the target machine.  Therefore, libgcc must be linked to a libc library that was compiled for the target system's architecture.
+        Since we don't initially have libc compiled for the target system (we must compile libc with our cross-compiler itself), and we cannot use the host system's libc since it 
+        (theoretically) supports a different architecture, we must make sure that libgcc does not include any code from libc when it is built.
+
+        <br><br>
+        Ok, now that we know <i>why</i> libgcc must not link to libc, it's time to figure out how the <span class="source_code">--with-newlib</span> 
+        and <span class="source_code">--without-header</span> flags play into this.  
+        
+        
+        <h2 id="highlevel"> High-level difference between --with-newlib and --without-header </h2>
+
+        I found an old email in the gcc-help mailing list archive where Ian Taylor, <a href="https://github.com/gcc-mirror/gcc/blob/releases/gcc-11.2.0/MAINTAINERS#L34">a Global Reviewer for GCC</a>,
+        explains the interplay between these two flags.  <a href="https://gcc.gnu.org/legacy-ml/gcc-help/2009-07/msg00373.html">Here's the archived email</a>, and here's a summary.
+        <br><br>
+
+        <ul>
+            <li><span class="source_code">--without-headers</span> is the default for a cross-compiler.</li>
+            <li><span class="source_code">--without-headers</span> forces libgcc (<b>only</b> libgcc) to be built without including any C library headers.</li>
+            <li><span class="source_code">--with-newlib</span> configures libgcc and the other libraries in the GCC package to use newlib headers wherever possible (<a href="https://sourceware.org/newlib/">newlib is a C library for embedded systems</a>).</li>
+        </ul>
+
+        The above points imply that using <span class="source_code">--with-newlib</span> alone causes libgcc and the other GCC libraries (e.g. libgomp) to be built with newlib headers. 
+        Using <span class="source_code">--without-headers</span> alone will cause libgcc to be built without the presence of any C library headers,
+        but will not affect other libraries included in the GCC distribution (in LFS, we disable building these other libraries until we have the C library available).  Using 
+        both <span class="source_code">--with-newlib</span> and <span class="source_code">--without-headers</span> will cause 
+        a) libgcc to be built without requiring 
+        any libc headers and b) other libraries to use newlib headers.
+        <br><br>
+
+
+        So, to build a cross-compiler for our Linux From Scratch distribution, do we need to specify <span class="source_code">--with-newlib</span>?  No, I don't think we do.  Let's look at the GCC build system source code.
+
+        <br><br>
+
+        The LFS description of <span class="source_code">--with-newlib</span> implies that we need this flag to define the <span class="source_code">inhibit_libc</span> macro.  However, if we look 
+        at GCC's top level <span class="source_code">configure.ac</span> file, <a href="https://github.com/gcc-mirror/gcc/blob/releases/gcc-11.2.0/gcc/configure.ac#L2399-L2413">we'll see the following lines</a>:
+
+        <br><br>
+        <img src="images/chickenEgg/inhibit_libc_configureac.JPG">
+        <br><br>
+
+        The condition on lines 2408 - 2410 define the scenarios in which <span class="source_code">inhibit_libc=true</span>.
+        There are two specific ones that I want to point out:
+        <br><br>
+        <ul>
+            <li>
+                We're compiling a cross-compiler, <i>and</i> (we've either set <span class="source_code">--without-headers</span> <i>or</i> <span class="source_code">stdio.h</span>
+                doesn't exist in the directory where the target's header files will go).  <span class="source_code">stdio.h</span> not being there suggests that the target platform 
+                does not have the libc headers available to it.
+            </li>
+            <li>
+                We've supplied the <span class="source_code">--with-newlib</span> flag, <i>and</i> (we've set <span class="source_code">--without-headers</span> <i>or</i> 
+                <span class="source_code">stdio.h</span> doesn't exist in the target's standard header directory).
+            </li>
+        </ul>
+
+        As Ian Taylor mentioned, <span class="source_code">--without-headers</span> is the default for a cross-compiler <br>
+        (<span class="source_code">test x$host != x$target</span>).  Thus, 
+        using the flag <span class="source_code">--with-newlib</span> is redundant, since even if this flag is not set, the conditions shown earlier 
+        will ensure that <span class="source_code">inhibit_libc=true</span>.
+
+        <br><br>
+
+        The other part of this code block that I want to point out is line 2413:
+        <br><br>
+        <span class="source_code">AC_SUBST(inhibit_libc)</span>.
+        <br><br>
+
+        <span class="source_code">AC_SUBST</span> is an Autoconf macro for creating output variables.  <span class="source_code">AC_SUBST(inhibit_libc)</span> 
+        will cause <span class="source_code">AC_OUTPUT</span>, the last macro that we call in <span class="source_code">configure.ac</span>, to replace instances of <span class="source_code">@inhibit_libc@</span>
+        in input files (<span class="source_code">Makefile.in</span>) with the value of <span class="source_code">inhibit_libc</span>.
+        <br><br>
+
+
+        If we look at <a href="https://github.com/gcc-mirror/gcc/blob/releases/gcc-11.2.0/gcc/Makefile.in#L734-L739">lines 734 - 739 of <span class="source_code">gcc/Makefile.in</span></a>, 
+        we'll see that this is where 
+        <span class="source_code">@inhibit_libc@</span> is substituted with the value <span class="source_code">true</span>. 
+        This in turn sets <span class="source_code">INHIBIT_LIBC_CFLAGS = -Dinhibit_libc</span>.
+
+        <br><br>
+        <img src="images/chickenEgg/at_inhibit_libc_at.JPG">
+        <br><br>
+
+        <a href="https://github.com/gcc-mirror/gcc/blob/releases/gcc-11.2.0/gcc/Makefile.in#L2149-L2161">Further down</a> in the same input Makefile, 
+        we create the file <i>libgcc.mvars</i> and write the <span class="source_code">INHIBIT_LIBC_CFLAGS</span> variable to it.
+        Thus, <i>libgcc.mvars</i> will contain the line <span class="source_code">INHIBIT_LIBC_CFLAGS = -Dinhibit_libc</span>.
+
+        <br><br>
+        <img src="images/chickenEgg/libgcc_target.JPG">
+        <br><br>
+
+        <i>libgcc.mvars</i> will get evaluated by the <a href="https://github.com/gcc-mirror/gcc/blob/releases/gcc-11.2.0/libgcc/Makefile.in#L183">
+        libgcc input <span class="source_code">Makefile</span></a> via this include directive on line 183.  
+        
+        <br><br>
+        <img src="images/chickenEgg/include_libgcc_mvars.JPG">
+        <br><br>
+        
+        Thus, the libgcc <span class="source_code">Makefile</span> will have access to the <span class="source_code">INHIBIT_LIBC_CFLAGS</span> variable.  
+        <a href="https://github.com/gcc-mirror/gcc/blob/releases/gcc-11.2.0/libgcc/Makefile.in#L247-L250">It will append the value of this variable to 
+            <span class="source_code">LIBGCC2_CFLAGS</span></a>.
+
+        <br><br>
+
+        If we keep following along, we'll see that the value of <span class="source_code">LIBGCC2_CFLAGS</span> is appended to 
+        <span class="source_code">INTERNAL_CFLAGS</span>.
+
+        <br><br>
+        <img src="images/chickenEgg/internal_cflags.JPG">
+        <br><br>
+
+        Then, on <a href="https://github.com/gcc-mirror/gcc/blob/releases/gcc-11.2.0/libgcc/Makefile.in#L317-L320">lines 317-320</a>, 
+        the flags bound to <span class="source_code">INTERNAL_CFLAGS</span> are appended to the variables 
+        <span class="source_code">gcc_compile</span> and <span class="source_code">gcc_s_compile</span>.
+
+        <br><br>
+        <img src="images/chickenEgg/gcc_compile_var.JPG">
+        <br><br>
+
+        These variables will be used when compiling the libgcc library.  This means that <span class="source_code">-Dinhibit_libc</span> 
+        will be passed as a preprocessor option to GCC.  This will define <span class="source_code">inhibit_libc</span> as a macro with the value 1.
+        This proves that we do not need <span class="source_code">--with-newlib</span> to define this macro.
+
+        <br><br>
+        <h2 id="inhibit-libc"> The effects of inhibit_libc on libgcc </h2>
+
+        A tangential question that I want to explore is how the <span class="source_code">inhibit_libc</span> macro will degrade our libgcc library. 
+        
+        <br><br>
+
+        If we do a search for the <span class="source_code">inhibit_libc</span> 
+        constant inside of the libgcc source code, the following files return a match.
+
+        <br><br>
+        <img src="images/chickenEgg/inhibit_libc.JPG">
+        <br><br>
+        
+        Many of these files are implementing stack unwinding for <a href="https://gcc.gnu.org/wiki/Dwarf2EHNewbiesHowto">DWARF2</a> exception handling. 
+        By inhibiting libc, these files won't be compiled, as most of their content is under <span class="source_code">#ifndef inhibit_libc</span> lines.  
+        Thus, libgcc won't be able to support exception handling features, like try-catch blocks in C++.
+
+        <br><br>
+
+        Other files listed here are related to libgcov.  According to the GCC docs, "gcov is a tool you can use in conjunction with GCC to test code coverage in your programs." [4]
+        Essentially, gcov is a profiler that lets you find performance statistics like how often each line of code executes and how much computing time each section of code uses.
+        Since we inhibit the use of the C library, the gcov runtime library interfaces will only be stubbed and thus not functional.  
+
+        <br><br>
+        
+        Next, we have <i>generic-morestack.c</i> and <i>generic-morestack-thread.c</i>.  These files provide library and thread library support for <span class="source_code">-fsplit-stack</span>, respectively.  
+        The <a href="https://man7.org/linux/man-pages/man1/gcc.1.html">GCC man page</a> describes the fsplit-stack option with "Generate code to automatically split the stack before it overflows... This is most useful when running threaded programs,
+        as it is no longer necessary to calculate a good stack size to use for each thread." [3]  These files won't get compiled if we have <span class="source_code">inhibit_libc</span> defined.
+        
+
+        <br><br>
+
+        To summarize, when building a cross-compiler for Linux From Scratch, we can ignore the <span class="source_code">--with-newlib</span> flag.   
+        The build process for cross-compilers, by default, will define <span class="source_code">inhibit_libc</span>, which will 
+        prevent libgcc from requiring libc support.  This will have several important effects on libgcc:
+        <br>
+        we'll lose the ability to support exception handling, gcov won't be functional, and we won't be able to provide the <span class="source_code">--fsplit-stack</span> option when compiling code.
+        However, even with this degraded libgcc, we'll still be able to build a fully functional glibc; none of these missing features from libgcc 
+        will impact glibc.  Understanding this last point was absolutely crucial for me in understanding the 
+        Linux From Scratch book and the build process itself.
+        <br><br>
+
+    </p>
+
+  
+    <br><br>
+    <h2 id="referenceHeader">References</h2>
+
+    <ul class="citation">
+        <li>[1] “5.3. GCC-11.2.0 - pass 1,” Linux From Scratch - Version 11.1 . [Online]. Available: https://www.linuxfromscratch.org/lfs/view/stable/chapter05/gcc-pass1.html. [Accessed: 29-Jul-2022].</li>
+        <li>[2] D. A. Wheeler, “Introduction to the autotools, part 1,” YouTube, 09-Mar-2012. [Online]. Available: https://www.youtube.com/watch?v=4q_inV9M_us. [Accessed: 29-Jul-2022].</li>
+        <li>[3] “gcc(1) - Linux manual page,” Linux man pages online. [Online]. Available: https://man7.org/linux/man-pages/man1/gcc.1.html. [Accessed: 29-Jul-2022].</li>
+        <li>[4] “gcov - a Test Coverage Program,” Gcov (using the GNU compiler collection (GCC)). [Online]. Available: https://gcc.gnu.org/onlinedocs/gcc/Gcov.html. [Accessed: 29-Jul-2022].</li>
+        <li>[5] “The GCC low-level runtime library,” Libgcc (GNU Compiler Collection (GCC) internals). [Online]. Available: https://gcc.gnu.org/onlinedocs/gccint/Libgcc.html. [Accessed: 29-Jul-2022].</li>
+
+    </ul>
+
+    </div></body></html>

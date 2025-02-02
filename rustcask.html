@@ -1,0 +1,244 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html  PUBLIC '-//W3C//DTD XHTML 1.0 Strict//EN'  'http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd'><html xmlns="http://www.w3.org/1999/xhtml"><head>
+    <meta content="text/html; charset=UTF-8" http-equiv="Content-Type"/> 
+    <title>Rustcask</title>
+    <link href="index.rss" rel="alternate" title="RSS" type="application/rss+xml"/> 
+    <style type="text/css">
+    a:link { color: #293145; border-bottom: solid thin #293145; }
+    a:visited { color: #666; border-bottom: dotted thin #666; }
+    a:hover { color: #666; border-bottom: dotted thin #666; }
+    a:active { color: #fff; border-bottom: none; }
+    a { text-decoration: none; }
+    
+    body {
+        margin-top: 50px;
+        margin-bottom: 20px;
+        margin-left: auto;
+        margin-right: auto;
+        min-width: 50em;
+        max-width: 750px; 
+        font-family: Georgia, Cambria, 'Times New Roman', Times, serif;
+        font-size: 20px;
+        line-height: 1.4;
+    }
+    
+    h2, h3, h4, .heading, .name {
+        color: #293145;
+        font-family: Arial, sans-serif;
+    }
+    
+    .heading, .name {
+        margin: 0;
+        text-align: right;
+    }
+    
+    .name {
+        font-size: 150%;
+        font-weight: bold;
+    }
+    
+    .me {
+        font-weight: bold;
+        font-style: inherit;
+    }
+    
+    .bibliography {
+        margin-left: 2em;
+        text-indent: -2em;
+    }
+    
+    .sideNote {
+        background-color: #d2d6fa;
+        
+        border-radius: 15px;
+        border-style: solid;
+        border-width: 5px;
+        border-color: black;
+        
+        box-shadow: 5px 5px rgba(0, 26, 98, 0.4),
+                  10px 10px rgba(0, 26, 98, 0.3),
+                  15px 15px rgba(0, 26, 98, 0.2),
+                  20px 20px rgba(0, 26, 98, 0.1),
+                  25px 25px rgba(0, 26, 98, 0.05);
+    
+    }
+    
+    .sideNote p {
+        padding-left: 1em;
+        padding-right: 1em;
+    }
+    
+    img {
+        max-width: 90%;
+        display: block;
+        margin-left: auto;
+        margin-right: auto;
+    }
+    
+    .citation {
+        list-style-type: none;
+    }
+
+    .code_file {
+        /* max-width: 1500px */
+        width: 100%;
+        max-width: 100%;
+        display: block;
+        margin-left: auto;
+        margin-right: auto;
+        float: center
+    }
+
+    .code_block {
+        max-width: 90%;
+        display: block;
+        margin-left: auto;
+        margin-right: auto;
+        background-color: #f9f9f9;
+        border: 1px dashed #2f6fab;
+    }
+
+    .source_code {
+        font-family: monospace,Courier !important;
+        display: inline-block;
+        font-size: 20px;
+    }
+    
+    </style>
+    </head>
+        
+    <body>
+
+    <div style="float: left; padding-top: 10px; padding-bottom: 10px;">
+    <p class="name"> Rustcask: a fast and efficient key-value storage engine, written in Rust and based on Bitcask
+        </p>
+    <p class="heading"><a href="./index.html">home</a>
+    </div>
+    <br clear="all"/>
+    </div>
+    <div style="padding: 10px;">
+
+    <h3>08/21/2024</h3>
+    <ul>
+        <li><a href="#rustcask">Rustcask</a></li>
+        <li><a href="#design">Design</a></li>
+        <li><a href="#lsm-comparison">Rustcask vs. Log-Structured Merge-Trees (LSM-trees) like LevelDB</a></li>
+        <li><a href="#performance">Performance</a></li>
+        <li><a href="#usage">Usage</a></li>
+        <li><a href="#future">What's next?</a></li>
+    </ul>
+
+
+    <p>
+        <h2 id="rustcask">Rustcask</h2>
+        I recently released Rustcask to <a href="https://github.com/RyanStan/rustcask">Github</a> and <a href="https://crates.io/crates/rustcask">crates.io</a>.
+        <br><br>
+        Rustcask is a fast and efficient key-value storage engine implemented in Rust. It's based on <a href="https://riak.com/assets/bitcask-intro.pdf">Bitcask, "A Log-Structured Hash Table for Fast Key/Value Data".</a>
+        <br><br>
+        Here are some interesting sections that I've copied from the <a href="https://github.com/RyanStan/rustcask/blob/main/README.md">README on Github</a>:
+        
+        <h2 id="design">Design</h2>
+        <h4 id="follow-bitcask">Bitcask</h4>
+        Rustcask follows the design of Bitcask very closely. A Rustcask directory is composed of data files. At any time,
+        there is only one active data file. Writes are appended to that data file, and once it reaches a certain size,
+        the file is closed and marked read-only.
+
+        <img src="./images/rustcask/rustcask_directory.png">
+
+        An in-memory data structure (see <a href="https://github.com/RyanStan/rustcask/blob/166696923c3fdeae3823f4242f70886014bebbdd/src/keydir.rs">keydir.rs</a>) maps each key to the data file and offset of the 
+        most recently written value for that key. This means that reads require only a single disk seek.
+
+        On restarts, Rustcask traverses data files within the Rustcask directory to rebuild the keydir.
+
+        <img src="./images/rustcask/rustcask-keydir.png">
+
+        By writing values to disk sequentially, Bitcask and Rustcask are able to achieve high write throughput. 
+        However, this append-only strategy means that stale (overwritten) values accumulate in the data files. This is why Bitcask and Rustcask
+        provide a <span class="source_code">merge</span> function, which compacts data files and removes stale keys. In production environments, managing background data file compaction
+        without affecting the key-value store's performance is a tricky problem.
+        <br><br>
+        
+        <h2 id="lsm-comparison">Rustcask vs. Log-Structured Merge-Trees (LSM-trees) like LevelDB</h2>
+        <h4 id="rustcask-over-lsm">What are the benefits of Rustcask over LSM-tree-based storage engines?</h4>
+        Rustcask's design is much simpler than LSM-tree storage engines like LevelDB. As such, it's an easy code base to maintain.<br><br>
+        
+        Additionally, Rustcask has less read amplification than LevelDB. For example, as described in the <a href="https://www.usenix.org/system/files/conference/fast16/fast16-papers-lu.pdf">WiscKey paper</a>, LevelDB has high read amplification because you may have to read up to 14
+        SSTable files to find the data you're looking for. In Rustcask, we store the entire keydir in memory, 
+        which means that reads require only a single seek.
+
+        <h4 id="lsm-over-rustcask">What are the benefits of LSM-trees like LevelDB over Rustcask</h4>
+        Rustcask stores the entire key-set in memory. If your key-set won't fit in memory, then LevelDB is a much better alternative
+        because LevelDB stores a sparse index of the key-set in memory.
+        <br><br>
+        LevelDB also supports efficient range queries because it writes values to disk in sorted order. Rustcask does not.
+        <br><br>
+        And finally, LevelDB is likely much more efficient in how it manages the background compaction process.
+
+        <h2 id="performance">Performance</h2>
+        I used the <a href="https://docs.rs/divan/latest/divan/index.html">Divan crate</a> for benchmarking Rustcask. 
+        The benchmarks that I wrote are stored under the <a href="https://github.com/RyanStan/rustcask/tree/166696923c3fdeae3823f4242f70886014bebbdd/benches">benches</a> directory. 
+        <br><br>
+
+        I've found that for write-heavy workloads,
+        I'm able to achieve a write bandwidth that is very close to the max write bandwidth my disk supports:
+
+        On my local desktop, <a href="https://www.mouser.com/datasheet/2/146/ssd_pro_6000p_brief-2474541.pdf">I have a disk that supports up to 560 MB/s of sequential write throughput</a>.
+
+        The <span class="source_code">bench_writes</span> workload shows that Rustcask is able to achieve up to 503 MB/s of write throughput. 
+        <br>
+        <img src="./images/rustcask/performance.png">
+        <br>
+
+        Read workloads also perform well, as they require only a single disk seek, and the operating system's caching layers eliminate many disk accesses anyways.
+
+        
+        <h2 id="usage">Usage</h2>
+        For examples of usage, see the <a href="https://github.com/RyanStan/rustcask/blob/166696923c3fdeae3823f4242f70886014bebbdd/tests/tests.rs">integration tests</a>, or the <a href="https://github.com/RyanStan/rustcask/blob/166696923c3fdeae3823f4242f70886014bebbdd/benches/readwrite.rs">performance tests</a>. 
+        The cargo documentation is also available at <a href="https://docs.rs/rustcask/latest/rustcask/">docs.rs/rustcask</a>.
+
+        Here is a simple set-get example:
+        <br>
+        <img src="./images/rustcask/set-get-example.png">
+        <br>
+
+        <h4 id="sync">Synchronous mode</h4>
+        By default, writes to Rustcask are not immediately flushed to disk. This improves performance
+        because the operating system can batch writes to disk. However, you can force 
+        Rustcask to immediately flush all writes to disk by enabling sync mode:
+        <br>
+        <img src="./images/rustcask/sync-example.png">
+        <br>
+
+        <h4 id="logging">Logging</h4>
+        Rustcask links to the <a href="https://crates.io/crates/log">log crate</a>, and uses the provided macros to log useful information. 
+        For these log messages to be emitted somewhere, consumers should provide their own logger implementation.
+
+        <h4 id="merging">Merging</h4>
+        When performing frequent key updates, the data files in the
+        rustcask directory will continue to grow in size because
+        old values are not updated or removed in-place.
+
+        The <span class="source_code">merge</span> function writes active key-values to a new set of
+        data files, and cleans up the old data files. This reduces the size of
+        the rustcask directory's contents by removing stale values.
+
+        <h2 id="future">What's next?</h2>
+        <h4 id="hint-files">Hint files</h4>
+        I never implemented hint files, as described in the Bitcask paper. Without hint files, 
+        starting up a production-size database on an existing Rustcask directory would take a long time.
+        However, I never really intended this to be used in a production environment, which is why I left it out.
+
+        <h4 id="performance-metrics">Performance metrics</h4>
+        To make Rustcask production-ready, it would need to output performance metrics.
+        For example, amount of bytes saved during compaction, count of dead vs. live keys within a given file, etc.
+
+        <h4 id="formal-methods">Lightweight formal methods</h4>
+        I recently read this paper from Amazon, 
+        <a href="https://www.amazon.science/publications/using-lightweight-formal-methods-to-validate-a-key-value-storage-node-in-amazon-s3">Using lightweight formal methods to validate a key-value storage node in Amazon S3</a>.
+
+        The authors talk about how they used lightweight formal methods to validate ShardStore, the key-value storage engine behind S3.
+        ShardStore is much much much more complex than Rustcask, but I still think there's some interesting takeaways from the paper to apply here.
+
+        For example, I'd like to write a test framework that performs property-based testing (section 4.1) to check conformance between Rustcask and a simple HashMap-based model.
+        <br><br><br><br>
+    </p>
+    </div></body></html>

@@ -1,0 +1,266 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html  PUBLIC '-//W3C//DTD XHTML 1.0 Strict//EN'  'http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd'><html xmlns="http://www.w3.org/1999/xhtml"><head>
+    <meta content="text/html; charset=UTF-8" http-equiv="Content-Type"/> 
+    <title>Optimizing performance: Nagle's algorithm and amazon-efs-utils v2.0.0</title>
+    <link href="index.rss" rel="alternate" title="RSS" type="application/rss+xml"/> 
+    <style type="text/css">
+    a:link { color: #293145; border-bottom: solid thin #293145; }
+    a:visited { color: #666; border-bottom: dotted thin #666; }
+    a:hover { color: #666; border-bottom: dotted thin #666; }
+    a:active { color: #fff; border-bottom: none; }
+    a { text-decoration: none; }
+    
+    body {
+        margin-top: 50px;
+        margin-bottom: 20px;
+        margin-left: auto;
+        margin-right: auto;
+        min-width: 50em;
+        max-width: 750px; 
+        font-family: Georgia, Cambria, 'Times New Roman', Times, serif;
+        font-size: 20px;
+        line-height: 1.4;
+    }
+    
+    h2, h3, .heading, .name {
+        color: #293145;
+        font-family: Arial, sans-serif;
+    }
+    
+    .heading, .name {
+        margin: 0;
+        text-align: right;
+    }
+    
+    .name {
+        font-size: 150%;
+        font-weight: bold;
+    }
+    
+    .me {
+        font-weight: bold;
+        font-style: inherit;
+    }
+    
+    .bibliography {
+        margin-left: 2em;
+        text-indent: -2em;
+    }
+    
+    .sideNote {
+        background-color: #d2d6fa;
+        
+        border-radius: 15px;
+        border-style: solid;
+        border-width: 5px;
+        border-color: black;
+        
+        box-shadow: 5px 5px rgba(0, 26, 98, 0.4),
+                  10px 10px rgba(0, 26, 98, 0.3),
+                  15px 15px rgba(0, 26, 98, 0.2),
+                  20px 20px rgba(0, 26, 98, 0.1),
+                  25px 25px rgba(0, 26, 98, 0.05);
+    
+    }
+    
+    .sideNote p {
+        padding-left: 1em;
+        padding-right: 1em;
+    }
+    
+    img {
+        max-width: 90%;
+        display: block;
+        margin-left: auto;
+        margin-right: auto;
+    }
+    
+    .citation {
+        list-style-type: none;
+    }
+
+    .code_file {
+        /* max-width: 1500px */
+        width: 100%;
+        max-width: 100%;
+        display: block;
+        margin-left: auto;
+        margin-right: auto;
+        float: center
+    }
+
+    .code_block {
+        max-width: 90%;
+        display: block;
+        margin-left: auto;
+        margin-right: auto;
+        background-color: #f9f9f9;
+        border: 1px dashed #2f6fab;
+    }
+
+    .source_code {
+        font-family: monospace,Courier !important;
+        display: inline-block;
+        font-size: 20px;
+    }
+    
+    </style>
+    </head>
+        
+    <body>
+
+    <div style="float: left; padding-top: 10px; padding-bottom: 10px;">
+    <p class="name">Optimizing performance: Nagle's algorithm and amazon-efs-utils v2.0.0
+        </p>
+    <p class="heading"><a href="./index.html">home</a>
+    </div>
+    <br clear="all"/>
+    </div>
+    <div style="padding: 10px;">
+
+    <h3>05/27/2024</h3>
+    <ul>
+        <li><a href="#intro">Amazon-efs-utils v2.0.0 and 9 KiB writes</a></li>
+        <li><a href="#nagles">Nagle's algorithm and NFS</a></li>
+        <li><a href="#conclusion">Lessons learned</a></li>
+    </ul>
+
+
+    <p>
+        <h2 id="intro">
+            Amazon-efs-utils v2.0.0 and 9 KiB writes</h2>
+        <i>Just a quick disclaimer: I wrote this article and conducted these experiments in my free-time, apart from my role at Amazon. All opinions here are my own.
+            <a href="https://github.com/aws/efs-utils">Amazon-efs-utils</a> is open source, and everything mentioned in this article is publicly available information.
+            The goal of this article is to show the effect of Nagle's algorithm and to describe how it works via an example.
+        </i>
+        <br><br>
+        <a href="https://github.com/aws/efs-utils">Amazon-efs-utils</a> is a client-side mount utility that establishes 
+        NFS mounts to EFS file systems. Historically, this utility's main purpose was to encrypt NFS traffic before
+        forwarding it to EFS. To achieve this, the utility would redirect NFS mounts to a local <a href="https://www.stunnel.org/">stunnel</a> process, which
+        would encrypt NFS traffic and forward it to EFS.
+        <br><br>
+        <img src="./images/nagles/efs_utils_v1_mount.PNG">
+        <br><br>
+        In April 2024, <a href="https://github.com/aws/efs-utils/tree/v2.0.0">we released amazon-efs-utils v2.0.0</a>. 
+        
+        The v2.0.0 release introduced a new component, efs-proxy, which replaced stunnel and 
+         enabled us to <a href="https://aws.amazon.com/about-aws/whats-new/2024/05/amazon-efs-maximum-per-client-throughput-1-5-gibs/#:~:text=Amazon%20EFS%20increases%20maximum%20per%2Dclient%20throughput%20to%201.5%20GiB%2Fs,-Posted%20On%3A%20May&text=Amazon%20EFS%20file%20systems%20now,intensive%20file%20workloads%20on%20AWS.">
+            increase the per-client throughput limit from 500 MiBps to 1500 MiBps.</a>
+        Like stunnel, efs-proxy receives NFS traffic from the local NFS client, and then forwards it to EFS. 
+        <br><br>
+        Shortly after releasing v2.0.0, it was brought to our attention that we could further optimize the performance
+        of a subset of workloads using efs-proxy.
+
+        <br><br>
+        I emulated one of these workloads with 
+        <a href="https://github.com/RyanStan/nagles-and-efs-utils-v2.0.0/blob/master/benchmarks.py">this Python script</a>:
+        <br><br>
+        <img src="./images/nagles/bench_write_code.PNG">
+        <br><br>
+        It performs 1 KiB writes, and then 9 KiB writes. These writes happen sequentially,
+        so there is only every one IO request in flight at any given time.
+        I tested this workload against a mount with the older version of efs-utils that used stunnel, 
+        and the newer version of efs-utils, which used efs-proxy.
+        <br><br>
+        Here are the workload test results for 1 KiB write latencies between efs-proxy and stunnel:
+        <br><br>
+        <img src="./images/nagles/1kib_v2_0_0.png">
+        <br><br>
+        Write latencies were consistent between stunnel and efs-proxy for 1 KiB writes. However, this was not the case with 9 KiB writes.
+        <br><br>
+        <img src="./images/nagles/9kib_v2_0_0.png">
+        Write latencies with efs-proxy were between 45-65 ms, which is higher than what we were seeing with stunnel.
+        What's going on here, and is there anything we can do to bring these latencies with efs-proxy down?
+
+        <br><br>
+
+        Let's look at a packet capture that I took while running the 9 KiB workloads.
+        <br><br>
+        Here are packets sent over the wire when using an EFS mount with stunnel:
+        <br><br>
+        <img src="./images/nagles/stunnel_9kib_pcap.PNG">
+        <br><br>
+        Packet #32 is the NFS write operation sent from the NFS client over the loopback interface to stunnel.
+        We can see that it's contained within a single TCP segment of 9636 bytes.
+        <br><br>
+        Packet #33 and #34 are the TCP segments that stunnel sends to EFS. 
+        The <a href="https://en.wikipedia.org/wiki/Maximum_transmission_unit">MTU</a> on my network interface
+        is 9001 bytes. The <a href="https://www.cloudflare.com/learning/network-layer/what-is-mss/">TCP max segment size</a> 
+        must be slightly lower than the MTU. This limit requires the client to split up our NFS write into two TCP segments - #33 and #34.
+        <br><br>
+        The packet capture shows us that stunnel sent the two packets in parallel, and then EFS acknowledged both TCP segments
+        with a single ACK in #35. 
+        <br><br>
+        Let's compare this behavior with efs-proxy. Here is the packet capture for the same NFS write, but sent over efs-proxy:
+        
+        <br><br>
+        <img src="./images/nagles/efs_proxy_9kib_pcap.PNG">
+        <br><br>
+        Packet #3738 is the NFS write operation sent from the NFS client over the loopback interface to efs-proxy.
+        <br><br>
+        As was the case earlier, the NFS write is split into two packets - Packet #3739 and #3743 are the TCP segments that efs-proxy sends to EFS.
+        However, with efs-proxy, these segments are not sent in parallel. Instead, the client sends the first segment,
+        and waits for an acknowledgement from EFS before it sends the second segment. 
+        Therefore, we've added an extra network round trip in the path of fulfilling our NFS write operation.
+        <br><br>
+        Why is efs-proxy not sending these TCP segments in parallel?
+        <br><br>
+        As Marc Brooker, a distinguished engineer at AWS wrote, <a href="https://brooker.co.za/blog/2024/05/09/nagle.html">"It's always TCP_NODELAY"</a>.
+
+        <br><br>
+        <h2 id="nagles">Nagle's algorithm and NFS</h2>
+        Nagle's algorithm is defined in
+
+        <a href="https://datatracker.ietf.org/doc/html/rfc896">RFC 896 - Congestion Control in IP/TCP Internetworks</a>.
+        <br><br>
+        As Marc pointed out, Nagle was concerned with applications like Telnet that saturated
+        networks with small packets. From the RFC:
+        <br><br>
+        <i>
+            "There is a special problem associated with small  packets.   When
+            TCP  is  used  for  the transmission of single-character messages
+            originating at a keyboard, the typical result  is  that  41  byte
+            packets  (one  byte  of data, 40 bytes of header) are transmitted
+            for each byte of useful data.  This 4000%  overhead  is  annoying
+            but tolerable on lightly loaded networks.  On heavily loaded networks,
+            however, the congestion resulting from this  overhead  can
+            result  in  lost datagrams and retransmissions, as well as excessive 
+            propagation time caused by congestion in switching nodes and
+            gateways.   In practice, throughput may drop so low that TCP connections are aborted."
+        </i>
+        <br><br>
+        Nagle emphasizes that this is the point in which a system may reach congestive collapse - a condition that
+        is tough to recover from.
+        <br><br>
+        Nagle's solution was,
+        <i>
+            "to inhibit the sending of new TCP segments when new outgoing data arrives from the user if any 
+            previously transmitted data on the connection remains unacknowledged."
+        </i>
+        <br><br>
+        For latency sensitive applications like NFS clients, this is very problematic. And this is exactly the behavior we were seeing with efs-proxy.
+        The second TCP segment wasn't sent until the first segment was acknowledged.
+        <br><br>
+        To disable Nagle's algorithm, we used the TCP_NODELAY socket option. After setting this socket option for efs-proxy
+        in efs-utils v2.0.1, we saw latencies significantly improve for the 9 KiB workload:
+        <br><br>
+        <img src="./images/nagles/9kib_v2_0_1.png">
+        <br><br>
+        One interesting thing to point out is that TCP_NODELAY doesn't seem to 
+        improve the performance of NFS workloads that use large IO sizes
+        like 1 MiB, even though these NFS requests must still be split into multiple TCP segments.
+        It also doesn't seem to improve the performance of workloads that maintain a high IO depth.
+        I <b>think</b> that the TCP window is kept full with high IO depth and large IO workloads, because there is constantly data being queued up to send.
+        Therefore, the workload isn't limited by Nagle's algorithm.
+        <br><br> 
+        <h2 id="conclusion">Lessons learned</h2>
+        This isn't a ground-breaking conclusion for anyone that is already familiar with Nagle's algorithm, but..
+        <br></br>
+        <i>disable Nagle's algorithm for latency sensitive applications, <b>like NFS clients</b>!</i>
+        <br><br>
+        <br><br>
+        Thanks for reading.
+        <a href="https://github.com/RyanStan/nagles-and-efs-utils-v2.0.0">
+            You can find my scripts and notebooks on Github
+        </a>.
+    </p>
+    </div></body></html>

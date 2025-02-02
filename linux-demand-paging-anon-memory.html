@@ -1,0 +1,534 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html  PUBLIC '-//W3C//DTD XHTML 1.0 Strict//EN'  'http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd'><html xmlns="http://www.w3.org/1999/xhtml"><head>
+    <meta content="text/html; charset=UTF-8" http-equiv="Content-Type"/> 
+    <title>Linux Kernel demand paging: mapping anonymous memory into a user process's address space</title>
+    <link href="index.rss" rel="alternate" title="RSS" type="application/rss+xml"/> 
+    <style type="text/css">
+    a:link { color: #293145; border-bottom: solid thin #293145; }
+    a:visited { color: #666; border-bottom: dotted thin #666; }
+    a:hover { color: #666; border-bottom: dotted thin #666; }
+    a:active { color: #fff; border-bottom: none; }
+    a { text-decoration: none; }
+    
+    body {
+        margin-top: 50px;
+        margin-bottom: 20px;
+        margin-left: auto;
+        margin-right: auto;
+        min-width: 50em;
+        max-width: 750px; 
+        font-family: Georgia, Cambria, 'Times New Roman', Times, serif;
+        font-size: 20px;
+        line-height: 1.4;
+    }
+    
+    h2, h3, .heading, .name {
+        color: #293145;
+        font-family: Arial, sans-serif;
+    }
+    
+    .heading, .name {
+        margin: 0;
+        text-align: right;
+    }
+    
+    .name {
+        font-size: 250%;
+        font-weight: bold;
+    }
+    
+    .me {
+        font-weight: bold;
+        font-style: inherit;
+    }
+    
+    .bibliography {
+        margin-left: 2em;
+        text-indent: -2em;
+    }
+    
+    .sideNote {
+        background-color: #d2d6fa;
+        
+        border-radius: 15px;
+        border-style: solid;
+        border-width: 5px;
+        border-color: black;
+        
+        box-shadow: 5px 5px rgba(0, 26, 98, 0.4),
+                  10px 10px rgba(0, 26, 98, 0.3),
+                  15px 15px rgba(0, 26, 98, 0.2),
+                  20px 20px rgba(0, 26, 98, 0.1),
+                  25px 25px rgba(0, 26, 98, 0.05);
+    
+    }
+    
+    .sideNote p {
+        padding-left: 1em;
+        padding-right: 1em;
+    }
+    
+    img {
+        max-width: 90%;
+        display: block;
+        margin-left: auto;
+        margin-right: auto;
+    }
+    
+    .citation {
+        list-style-type: none;
+    }
+
+    .code_file {
+        /* max-width: 1500px */
+        width: 100%;
+        max-width: 100%;
+        display: block;
+        margin-left: auto;
+        margin-right: auto;
+        float: center
+    }
+
+    .code_block {
+        max-width: 90%;
+        display: block;
+        margin-left: auto;
+        margin-right: auto;
+        background-color: #f9f9f9;
+        border: 1px dashed #2f6fab;
+    }
+
+    .source_code {
+        font-family: monospace,Courier !important;
+        display: inline-block;
+        font-size: 20px;
+    }
+    
+    </style>
+    </head>
+        
+    <body>
+
+    <div style="float: left; padding-top: 10px; padding-bottom: 10px;">
+    <p class="name">Linux Kernel demand paging: mapping anonymous memory into a user process's address space.</p>
+    <p class="heading"><a href="index.html">home</a>
+    </div>
+    <br clear="all"/>
+    </div>
+    <div style="padding: 10px;">
+
+    <h3>08/13/2023</h3>
+    <ul>
+        <li><a href="#intro">Intro</a></li>
+        <li><a href="#body">Code Investigation</li>
+        <li><a href="#conclusion">Conclusion</a></li>
+        <li><a href="#referenceHeader">References</a></li>
+
+    </ul>
+
+    <br>
+
+    This article is based on Linux v6.0.12 and the x86 architecture.
+
+    <h2 id="intro">Intro</h2>
+    When a user process requests anonymous memory (not backed by a file) from the Kernel through a 
+    system call like <span class="source_code">malloc</span> or <span class="source_code">brk</span>, the Kernel expands the process's address space.
+    A process's address space is defined by <span class="source_code">vm_area_struct</span> instances, which describe memory regions.  
+    A process's address space is expanded by adding new memory regions or expanding the existing ones.
+    <br><br>
+    When a userprocess's address space is expanded, the Kernel does not immediately allocate any physical memory for these new 
+    virtual addresses.  
+    Instead, the Kernel implements demand paging, where a page will only be allocated from physical memory 
+    and mapped to the address space when 
+    the user process tries to write to that new virtual memory address. If a page cannot be allocated from memory
+    due to memory constraints, then the Kernel will swap out the least recently used pages onto disk at an area known as the swap space.
+    <br><br>
+
+    In this article, I'll be taking a look at the Linux Kernel code that handles page faults. I want to see how the Kernel
+    allocates page frames and maps them into the address space of user processes.
+    <br><br>
+
+    <h2 id="body">Code Investigation</h2>
+    Up until Linux v6.1, the entry point in x86 for page faults was the assembly routine <span class="source_code">page_fault</span>. However, 
+    <a href="https://github.com/torvalds/linux/commit/91eeafea1e4b7c95cc4f38af186d7d48fceef89a">this commit in 2020</a> did 
+    some rearranging.  
+    <br><br>
+    <img src="images/page_fault/asm_exc_page_fault.png">
+    <i>Figure 1</i>
+    <br><br>
+
+    Now, the C entry point is <span class="source_code">DEFINE_IDTENTRY_RAW_ERRORCODE(exc_page_fault)</span> in <i>/arch/x86/mm/fault.c</i>
+    (<a href="https://elixir.bootlin.com/linux/v6.0.12/source/arch/x86/mm/fault.c#L1500">code link</a>).
+
+    <br><br>
+    <div class="sideNote">
+        <p>
+           For the 32-bit x86 architecture, the virtual memory address space has a 3:1 split, 3 GiB for user space addresses and the top 1 GiB for Kernel space addresses.
+           The Kernel uses some of this 1 GiB to directly map some of the physical address space.
+
+            By reserving this upper portion of memory for Kernel virtual memory address space, a Kernel thread can use the set of page tables of the last running process
+            process and avoid TLB and cache flushes.
+            <br><br>
+            <img src="images/page_fault/virtual_memory_mapping.png">
+            <i>Figure 2</i><br>
+            <a href="https://linux-Kernel-labs.github.io/refs/heads/master/labs/memory_mapping.html">Image source</a> <br>
+            <a href="https://www.Kernel.org/doc/html/v4.18/vm/highmem.html">Linux Memory Management Documentation.</a> <br>
+            [3]
+            
+        </p>
+    </div>
+
+    <br><br>
+    Within <span class="source_code">DEFINE_IDTENTRY_RAW_ERRORCODE</span>, we see a call to <span class="source_code">handle_page_fault(regs, error_code, address)</span>. This function checks whether the
+    address that triggered the fault belongs to the Kernel's address space or the user's address space, and then calls <span class="source_code">do_kernel_addr_fault</span> or <span class="source_code">do_user_addr_fault</span>.
+    
+    <br><br>
+    <img src="images/page_fault/handle_page_fault.png">
+    <i>Figure 3</i><br>
+    <a href="https://elixir.bootlin.com/linux/v6.0.12/source/arch/x86/mm/fault.c#L1476">Code link</a>
+    <br><br>
+
+    I'm interested in the case where a user process attempts to access a valid address in it's virtual address space for the first time.
+    Thus, I'm going to skip to <span class="source_code">do_user_addr_fault</span>
+    (<a href="https://elixir.bootlin.com/linux/v6.0.12/source/arch/x86/mm/fault.c#L1220">code link</a>).
+
+    This function begins with a few checks:
+    <br><br>
+    <ol>
+        <li>Is this Kernel mode code trying to execute from user memory?</li>
+        <li>Are the page table entry bits reserved bits valid?</li>
+        <li>If <a href="https://en.wikipedia.org/wiki/Supervisor_Mode_Access_Prevention">SMAP</a> is enabled, check for invalid Kernel access to user pages in the user addres space</li>
+        <li>Are we in an interrupt? Ignore the fault if so.</li>
+        <li>See if it's safe to enable irqs.</li>
+        <li>Is this a fault in a vsyscall page that needs emulation?</li>
+    </ol>
+
+    <br><br>
+    After performing the above checks and 
+    <a href="https://elixir.bootlin.com/linux/v6.0.12/source/arch/x86/mm/fault.c#L1338">acquiring the necessary locks</a>,
+    the Kernel acquires the memory descriptor, <span class="source_code">mm_struct</span>, of the task that was executing when the page fault occurred, and looks for the memory region that contains the faulty address.
+    Most of this logic happens in the <span class="source_code">find_vma</span> function.
+
+    <br><br>
+    <img src="images/page_fault/find_vma.png">
+    <i>Figure 4</i><br>
+    <a href="https://elixir.bootlin.com/linux/v6.0.12/source/arch/x86/mm/fault.c#L1358">Code link</a>
+    <br><br>
+
+    <span class="source_code">struct vm_area_struct *find_vma(struct mm_struct *mm, unsigned long addr)</span> is an interesting and 
+    important function.  It's defined in <i>/mm/mmap.c</i> (<a shref="https://elixir.bootlin.com/linux/v6.0.12/source/mm/mmap.c#L2256">code link</a>).
+
+    From "Understanding the Linux Kernel"[3]: <br>
+    <i>The <span class="source_code">find_vma()</span> function acts on two parameters, the address 
+    <span class="source_code">mm</span> of a memory descriptor and a linear address <span class="source_code">addr</span>.  
+    It locates the first memory region whose <span class="source_code">vm_end</span> field is greater than <span class="source_code">addr</span>
+    and returns the address of its descriptors.</i>
+
+    <br><br>
+    <img src="images/page_fault/find_vma_function.png">
+    <i>Figure 5</i><br>
+    <span class="source_code">find_vma()</span><br>
+    <a href="https://elixir.bootlin.com/linux/v6.0.12/source/mm/mmap.c#L2256">Code link</a>
+    <br><br>
+
+    This function reveals one cool thing about the way these memory region descriptors are stored.  In addition to
+    being stored in a sorted linked list, they're also stored in a red black tree.  We get the root of the tree
+    with the statement <br>
+    <span class="source_code">rb_node = mm->mm_rb.rb_node;</span> <br>
+    
+    and then we search through the tree with binary search.  In a process with many memory regions,
+    reducing the time complexity of this function from linear to logarithmic time is very important.
+    <br><br>
+    Let's step back up to figure 4, the code where we call <span class="source_code">find_vma</span>.
+    If we assume that the address is within a valid memory region of the process, we will enter the conditional <br>
+    <span class="source_code">if (likely(vma->vm_start <= address))</span> and we will <br><span class="source_code">goto good_area</span>.
+
+
+    <br><br>
+    <img src="images/page_fault/good_area.png">
+    <i>Figure 6</i>
+    <br><br>
+
+    First we check to see if there was an access error - e.g. the process tried to write to the address but it doesn't have write permissions.
+    Assuming permissions are good, we call  <span class="source_code">handle_mm_fault</span> which does some more checks
+    and then calls <span class="source_code">__handle_mm_fault(vma, address, flags, regs);</span>.
+
+    This function is located in <i>/mm/memory.c</i> and is common to all the 
+    different architectures (<a href="https://elixir.bootlin.com/linux/v6.0.12/source/mm/memory.c#L4969">code link</a>).
+
+    This function is in charge of allocating page tables and page table entries for the virtual address that triggered the page fault.
+
+    <br><br>
+    <img src="images/page_fault/_handle_mm_fault.PNG">
+    <i>Figure 7: The beginning of _handle_mm_fault</i>
+    <br><br>
+    
+    The <span class="source_code">vm_fault</span> instance is used to store information about the page fault and pass it to
+    <span class="source_code">handle_pte_fault</span>.
+
+    <a href="https://www.Kernel.org/doc/html/v5.9/x86/x86_64/5level-paging.html">Five-level paging</a> 
+    is now supported in many intel processors.  With five level paging, a virtual address is split up the following way:
+
+    <br><br>
+    <img src="images/page_fault/5levelpaging.PNG">
+    <i>Figure 8</i><br>
+    <a href="https://lenovopress.lenovo.com/lp1468.pdf">Image Source</a>
+    <br><br>
+
+    Let's look at several key lines of <span class="source_code">_handle_mm_fault</span>.<br><br>
+    <span class="source_code">pgd = pgd_offset(mm, address);</span><br>
+    This function returns the virtual address of the entry in the Page Global Directory that corresponds to the address.
+    <br><br>
+    <span class="source_code">p4d = p4d_alloc(mm, pgd, address);</span><br>
+    This function allocates or returns an existing P4 Directory entry for the given address. Since P4 Directories are indexed by Page Global Directory entries,
+    we're required to pass in the Page Global Directory entry that we found above. My assumption is that for architectures without 
+    five level paging, this just returns the Page Global Directory entry.
+    <br><br>
+    <span class="source_code">vmf.pud = pud_alloc(mm, p4d, address);</span><br>
+    This function allocates or returns an existing Page Upper Directory entry for the given address. This entry is attached to the
+    <span class="source_code">vm_fault</span> instance.
+    <br><br>
+    <span class="source_code">vmf.pmd = pmd_alloc(mm, vmf.pud, address);</span><br>
+    This function allocates or returns an existing Page Middle Directory entry for the given address. This entry is also attached to the
+    <span class="source_code">vm_fault</span> instance. This PMD entry allows us to access the last level in our paging scheme- the page table.
+    <br><br>
+    
+
+    Once we've allocated the required page table entries to map the faulting virtual memory address, we call 
+    <span class="source_code">return handle_pte_fault(&vmf)</span>
+    (<a href="https://elixir.bootlin.com/linux/v6.0.12/source/mm/memory.c#L4896">code link</a>). <br>
+    Let's look at the following lines from the <span class="source_code">handle_pte_fault</span> function:<br>
+    <br><br>
+    <img src="images/page_fault/pte_offset_map.PNG">
+    <i>Figure 9</i>
+    <br><br>
+
+    <span class="source_code">pte_offset_map</span> accepts a pointer to a Page Middle Directory entry and a virtual address.
+    It returns the address of the page table entry that maps the virtual address.  Assuming that this is the first time the 
+    user process has tried accessing the address,
+    the returned address would point to an empty, or uninitialized, page table entry.  
+    
+    Let's look further down in the same function.
+
+    <br><br>
+    <img src="images/page_fault/enter_do_anonymous_page.png">
+    <i>Figure 10</i>
+    <br><br>
+
+    Since the page table entry hasn't been initialized, <span class="source_code">!vmf->pte</span> will return true.
+    Let's assume that the virtual address is part of an anonymous memory region, which means it's not backed by a file, 
+    as would be the case after a process attempts to use an address returned by the C stdlib function <a href="https://man7.org/linux/man-pages/man3/malloc.3.html">malloc</a>.
+    We'll enter <span class="source_code">do_anonymous_page</span> (<a href="https://elixir.bootlin.com/linux/v6.0.12/source/mm/memory.c#L4033">code link</a>).
+    <br><br>
+    One of the first things <span class="source_code">do_anonymous_page</span> does is allocate a page table entry.
+    
+    <br><br>
+    <img src="images/page_fault/pte_alloc.PNG">
+    <i>Figure 11</i>
+    <br><br>
+
+    <span class="source_code">pte_alloc</span> accepts a memory descriptor and the address of a pmd entry.
+    It will allocate and initialize a new page table entry (with the User/Supervisor flag set) and return the virtual address of it [3]. 
+    However, this entry will not have it's address field set yet.
+
+    <br><br>
+    <div class="sideNote">
+        <p>
+            On the Intel x86 architecture, a page table entry has the following format:
+            <br><br>
+            <img src="images/page_fault/Page_table_entry.png">
+            <i>Figure 12</i><br>
+            <a href="https://wiki.osdev.org/Paging">Image source</a> <br><br>
+            The address field points to a physical memory address. This is the address that the
+            memory management unit translates the virtual address associated with this page table entry to.
+            This field leaves out the least significant 12 bits of the physical address. This is because page table entries
+            are aligned to Page boundaries, which are at intervals of 4096 Bytes (2^12). Thus, the memory management unit can assert that the lower
+            12 bits of the address field are always 0.
+            
+        </p>
+    </div>
+    <br><br>
+
+    
+    Further down in <span class="source_code">do_anonymous_page</span>, after the page table entry has been allocated, we see the following code:
+
+    <br><br>
+    <img src="images/page_fault/do_anon_page_read.PNG">
+    <i>Figure 13</i>
+    <br><br>
+
+    This is the code that handles page faults on reads. We already know that the faulting virtual address maps to anonymous memory and 
+    that this is the first time this virtual address was accessed, which is why the page fault occurred. Thus, I think that the Kernel
+    maps the page table entry to a common "Zero Page" and makes this page write protected. This will cause another Page Fault to occur when this
+    page is written to. This is an example of Copy on Write behavior [1].<br><br>
+
+    Right below the above code is where we handle page faults on writes. It starts with the following block: 
+
+    <br><br>
+    <img src="images/page_fault/do_anon_page_write_alloc.PNG">
+    <i>Figure 14</i>
+    <br><br>
+
+    The conditional <span class="source_code">if (unlikely(anon_vma_prepare(vma)))</span> is used to make sure that 
+    the memory region described by 
+    <span class="source_code">vma</span> has an <span class="source_code">anon_vma</span> attached to it.  This data structure is used to collect the regions which reference a given anonymous memory region
+    into a doubly linked circular list. I'm not sure which other code path makes use of this list.<br><br>
+    
+    The allocation of <span class="source_code">anon_vma</span> will
+    only need to happen the first time we map a page frame into the anonymous region [3].  Therefore, the common case is that <span class="source_code">anon_vma</span> already exists, 
+    which is why we give the compiler a "heads up" with <span class="source_code">unlikely</span>.  
+    <br><br>
+    The macro <span class="source_code"> alloc_zeroed_user_highpage_movable(vma, vmf-address)</span> is defined as
+    <span class="source_code">alloc_page_vma(GFP_HIGHUSER_MOVABLE | __GFP_ZERO, vma, vaddr)</span>. 
+    This function will allocate a zeroed out page frame for us. This is a physical page of memory! <br>
+    The Kernel code has a comment that describes the "<a href="https://elixir.bootlin.com/linux/v6.0.12/source/include/linux/gfp_types.h#L321">GFP_HIGHUSER_MOVABLE </a> flag: <br><br>
+    <i>"GFP_HIGHUSER_MOVABLE is for userspace allocations that the Kernel does not need direct access to but can use kmap() when access is required."</i>
+    <br><br>
+    The <span class="source_code">kmap() function</span> is used by Kernel code to map high memory pages into low memory.
+    Recall that (on x86) low memory is the section of the Kernel virtual address space which directly maps the first 896 MB of physical memory,
+    while high memory is physical memory that is not directly mapped into the Kernel's virtual address space, and which must be temporarily mapped into it.<br><br>
+    The other flag, <span class="source_code">__GFP_ZERO</span>, makes sure that we are given zeroed memory.
+    <br><br>
+    After the physical memory page is allocated, we create the page table entry value that we will insert into our newly allocated page table entry position:
+
+    <br><br>
+    <img src="images/page_fault/make_pte.PNG">
+    <i>Figure 15</i><br>
+    <a href="https://elixir.bootlin.com/linux/v6.0.12/source/mm/memory.c#L4101">Code link</a>
+    <br><br>
+
+    The function <span class="source_code">make_pte</span> generates a page table entry value
+    that points to the newly allocated <span class="source_code">page</span>.  Refer back to figure 12
+    for the format of page table entries. Let's take a deeper look at this function.
+    <br><br>
+    This function, <span class="source_code">make_pte</span>,  has to get the physical address of the page in memory that the struct page instance is associated with.
+    Then, it has to add in the page protection and status bits (<span class="source_code">vma->vm_page_prot</span>)
+    with simple bitwise operations.
+    <br><br>
+    
+    Before we look at the source code for this function, let's recall how the Kernel stores 
+    <span class="source_code">struct page</span> instances. In a FLATMEM memory model,
+    there is a global <span class="source_code">mem_map</span> array that maps the entire physical memory [5]. 
+    Each index in the array corresponds to a page frame number (PFN).  For example, index 2 contains the struct 
+    page instance for page frame number 2.  Now, assuming a 32-bit system with 4 GiB of memory and 4096 byte pages,
+    then you will have 2^20 (1,048,576) page frames.  Thus, this will be the number of <span class="source_code">page</span> 
+    instances within <span class="source_code">mem_map</span> array.
+    <br><br>
+
+    If you have a <span class="source_code">struct page</span> instance, and you know its page frame number (pfn), then you can
+    perform some arithemtic (pfn * 4096 bytes) to get the physical address that the <span class="source_code">struct page</span> corresponds to.
+    
+    <br><br>
+    Let's look at the source code for <span class="source_code">make_pte</span>:
+
+    <br><br>
+    <img src="images/page_fault/mk_pte.PNG">
+    <i>Figure 16</i><br>
+    <a href="https://elixir.bootlin.com/linux/v6.0.12/source/arch/x86/include/asm/pgtable.h#L814">Code link</a>
+    <br><br>
+
+    <span class="source_code">page_to_pfn</span> in a FLATMEM model does some arithmetic to get the page frame number associated with a <span class="source_code">page</span>:
+    <br><br>
+    <span class="source_code">((unsigned long)((page) - mem_map) + ARCH_PFN_OFFSET)</span>
+    <br><br>
+
+    It subtracts the address of the first element in the <span class="source_code">mem_map</span> array 
+    , which contains the <span class="source_code">struct page</span> instance for the 0th page frame,
+    from the address of the given <span class="source_code">page</span>. <br>
+    <span class="source_code">ARCH_PFN_OFFSET</span> defines the first page frame number for systems with physical memory starting at addresses different from 0. 
+    [5]. In our case, we can assume that this value is zero.
+    <br><br>
+    Due to the behavior of C pointer arithmetic,
+    the expression above will return us the index of the <span class="source_code">page</span> instance within the  
+    <span class="source_code">mem_map</span> array.  This index is the page frame number! As seen in figure 16, this page frame number and the page protection
+    flags are then
+    passed to the <span class="source_code">pfn_pte</span> function. This function generates a page table entry which points to the 
+    physical address of the page frame and has the page protection flags set
+    <br><br>
+
+    Let's look at the source code for <span class="source_code">pfn_pte</span>:
+    
+
+    <br><br>
+    <img src="images/page_fault/pfn_pte.png">
+    <i>Figure 17</i><br>
+    <a href="https://elixir.bootlin.com/linux/v6.0.12/source/arch/x86/include/asm/pgtable.h#L577">Code link</a>
+    <br><br>
+
+    In the first line, we calculate the physical address of the page frame.  
+    By shifting the page frame number to the left <span class="source_code">PAGE_SHIFT</span> bits, we are multiplying the page frame number 
+    by the page frame size, 4096 bytes. This gives us the physical address of the page frame.
+    <br><br>
+
+    Now that we have a page table entry which maps our physical address, we can step back up to <span class="source_code">do_anonymous_page</span>:
+
+    <br><br>
+    <img src="images/page_fault/make_pte.PNG">
+    <i>Figure 18</i><br>
+    <a href="https://elixir.bootlin.com/linux/v6.0.12/source/mm/memory.c#L4101">Code link</a>
+    <br><br>
+
+    <span class="source_code">entry = mk_pte(page, vma->vm_page_prot</span> <br>
+    This is what we just covered above. It creates a page table entry for the given page with the proper page protection flags.
+    <br><br>
+
+    <span class="source_code">entry = pte_sw_mkyoung(entry)</span> <br>
+    I think that on most architectures, the hardware handles setting a page table entry's access bit. However, some architectures
+    require the programmer to manually do this. For these latter architectures, I think that this function will set the access bit, while for the former
+    architectures, it is a noop.
+    <br><br>
+    
+    <span class="source_code">entry = pte_mkwrite(pte_mkdirty(entry))</span> <br>
+    If the access to the faulting memory address was a write, we set the Write and Dirty flags on the page table entry,
+    to indicate that this page frame is writable and that it has been written to [2] [4].
+    <br><br>
+
+    If we skip to the end of the <span class="source_code">do_anonymous_page</span> function, we see the following code:
+
+    <br><br>
+    <img src="images/page_fault/end_do_anon_page.png">
+    <i>Figure 19</i><br>
+    <a href="https://elixir.bootlin.com/linux/v6.0.12/source/mm/memory.c#L4127">Code link</a>
+    <br><br>
+
+    Recall that <span class="source_code">vmf->pte</span> is the page table entry that the faulting address, 
+    <span class="source_code">vmf->address</span>, maps to. 
+    Thus, it's safe to assume that <br>
+    <span class="source_code">set_pte_at(vma->vm_mm, vmf->address, vmf->pte, entry)</span> <br>
+    sets the actual value of the page table entry to the value of the entry that we created above.
+
+    <br><br>
+    <span class="source_code">update_mmu_cache(vma->vma, vmf->address, vmf->pte)</span><br>
+    This looks like a noop on x86.
+
+    <br><br>
+    <span class="source_code">put_page(page)</span><br>
+    I think that this just frees up memory associated with the in-memory representation of the page.
+    <br><br>
+
+    <h2 id="conclusion"> Conclusion </h2>
+
+    And there you have it. We traced the page faults from <span class="source_code">handle_page_fault</span>
+    to the end of <span class="source_code">do_anonymous_page</span>. Along the way, we saw the Kernel
+    <ul>
+        <li>Acquire the memory descriptor associated with the user process that was running</li>
+        <li>Get the virtual memory area of the address that the fault occurred on</li>
+        <li>Create the required page table structures to map the virtual address to a physical address</li>
+        <li>Allocate a page of physical memory</li>
+        <li>Set the page table entry for the virtual address to point to our newly allocated page</li>
+    </ul>
+    
+    <br>
+    <h2 id="referenceHeader">References</h2>
+    <ul class="citation">
+        <li>[1] "5.6 Page Faulting" chudov.com, [Online]. Available: https://www.chudov.com/tmp/LinuxVM/html/understand/node35.html [Accessed 6 January 2023]</li>
+        <li>[2] “Architecture Page Table Helpers — The Linux Kernel documentation,” docs.kernel.org. https://docs.kernel.org/mm/arch_pgtable_helpers.html (accessed Aug. 07, 2023).</li>
+        <li>[3] D. P. Bovet and M. Cesati, Understanding the Linux Kernel, 3rd Edition, O'Reilly Media, Inc., 2005. </li>
+        <li>[4] “Paging - OSDev Wiki,” wiki.osdev.org. https://wiki.osdev.org/Paging</li>
+        <li>[5] “Physical Memory Model — The Linux Kernel documentation,” www.kernel.org. https://www.kernel.org/doc/html/v5.2/vm/memory-model.html (accessed Aug. 07, 2023).</li>
+    </ul>
+    <ul class="citation">
+        
+
+    </ul>
+
+    </div></body></html>
